@@ -1,0 +1,346 @@
+import json
+import argparse
+from colorama import Fore, Back, Style, init
+from tqdm import tqdm
+import pickle as pkl
+init(autoreset=True)
+import os
+from tqdm import tqdm
+import random
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModel
+import numpy as np
+import sys
+import re
+from rouge import Rouge
+import time
+from copy import deepcopy
+import torch
+from vllm import LLM, SamplingParams
+import torch.nn.functional as F
+import signal
+
+from data_process import pretty_history, mini_pretty_history
+from instruction import get_his, build_rag_instruction, SYS_PROMPT_SINGLE
+from pwab import functions, data
+
+def handler(sig, frame):
+    print("Exiting gracefully...")
+    sys.exit(0)
+signal.signal(signal.SIGINT, handler)  
+    
+ROUGE_THRESHOLD_DICT = {
+    'LaMP_4': 0.15,
+    'LaMP_5': 0.15,
+    'abstract_generation': 0.2,
+}
+functions_dict = {tool.__name__: tool for tool in functions}
+init_data = data
+func_cnt = {
+    "add_product_review": [0, 0],
+    "get_recommendations_by_history": [0, 0],
+    "search_product_by_query": [0, 0]
+}
+
+def get_random_sample(args, uid, calibration_data):
+    random_sample = []
+    for i in range(args.k):
+        user = uid
+        while user == uid:
+            user = random.choice(u_ids)
+        if args.dataset in ['pwab', 'pwab_pos']:
+            item = random.choice(calibration_data[user])
+            sample = random.choice(item['history'])
+        else:
+            sample = random.choice(calibration_data[user])
+        random_sample.append(sample)
+
+    q_a_history = []
+    for idx, sample in enumerate(random_sample):
+        if args.dataset in ['pwab', 'pwab_pos']:
+            line = pretty_history(sample, idx)
+        elif 'text' in sample:
+            line = f"Historical sample {idx}:\n Q: {sample['text']}. \n A: {sample['title']}."
+        else:
+            line = f"Historical sample {idx}:\n Q: {sample['input']}. \n A: {sample['output']}."
+        q_a_history.append(line)
+    q_a_history = '\n'.join(q_a_history)
+    return q_a_history
+
+def generate_response_api(
+    args,
+    tokenizer,
+    prompt: str,
+    top_k: int,
+    max_length: int = 256,
+    system_message: str = None,
+    temperature: float = 0,
+):
+    
+    if args.llm == 'llama-3.1':
+        sys_msg = (
+            f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>/n{system_message}<|eot_id|><|start_header_id|>user<|end_header_id|>/n"
+        )
+        # Prepare the prompt by combining system_message and user prompt
+        full_prompt = (
+            sys_msg
+            + "\n"
+            + prompt
+            + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
+        )
+    else:
+        message = [{'role': 'system', 'content': system_message}, {'role': 'user', 'content': prompt}]
+        full_prompt = tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True)
+    
+    output = llm.generate(full_prompt, sampling_params)
+    message = output[0].outputs[0].text
+    
+    message = message.replace("<|eot_id|>", "").replace("<|end_of_text|>", "").strip()
+
+    return message
+    
+    
+    
+def generate(args, tokenizer, problem_instance, history=""):
+    p_id = problem_instance['id']
+    raw_prompt = problem_instance['input']
+    
+    # print(Fore.GREEN + raw_prompt)
+    sys_prompt = SYS_PROMPT_SINGLE if args.dataset in ['pwab', 'pwab_pos'] else ""
+    output = generate_response_api(args, tokenizer, raw_prompt, top_k=1, max_length=1024, system_message=sys_prompt)
+    print(Fore.YELLOW + output)
+    if '</think>' in output:
+        output = output.split('</think>')[-1]
+    if args.form == 'json':
+        if '```json' in output:
+            output = output.split('```json')[1].split('```')[0]
+        try:
+            output = json.loads(output)
+        except Exception as e:
+            print(e)
+            output = {}
+    elif args.form == 'python':
+        try:
+            output = re.search(r'print\(["\'](.*?)["\']\)', output).group(1)
+        except Exception as e:
+            print(e)
+            output = ""
+    output_dict = {
+        'id': p_id,
+        'generation': output,
+        'output': problem_instance['output']
+    }
+
+    return output_dict
+
+def process_sample(samples, user, args, calibration_data, calibration_ranked, rouge_threshold):
+    results = []
+    for i in range(args.num_neg_per_user):  # Negative samples
+        samples_cp = deepcopy(samples)
+
+        if args.rag == 'history':
+            ranked_his = get_his(args.dataset, samples_cp['id'], args.k, calibration_ranked, random_sample=True)
+        elif args.rag == 'others':
+            ranked_his = get_random_sample(args, user, calibration_data)
+
+        if args.dataset in ['pwab', 'pwab_pos']:
+            raw_prompt = build_rag_instruction(args.dataset, args.form, samples_cp, ranked_his)
+        else:
+            raw_prompt = build_rag_instruction(args.dataset, args.form, samples_cp['input'], ranked_his)
+        qa_line = {'id': samples_cp['id'], 'input': raw_prompt, 'output': samples_cp['output']}
+        caa_line = {'question': raw_prompt, 'chosen': samples_cp['output']}
+        
+        output_dict = generate(args, tokenizer, qa_line)
+        if not output_dict['generation']:
+            continue
+
+        if args.dataset == 'pwab_pos':
+            action = output_dict['generation']['tool_call']
+            caa_line = {'question': samples['input'], 'chosen': samples['output']['tool_call'], 'rejected': output_dict['generation']}
+            if action['name'] in functions_dict:
+                try:
+                    all_data = deepcopy(init_data)
+                    obs = functions_dict[action["name"]](
+                        data=all_data, **action["arguments"]
+                    )
+                    res = calculate_reward(samples_cp, action['name'], obs)
+                    if res[0] == 1:
+                        if samples['type'] == 'search' and 0.65 > res[1]:
+                            results.append(caa_line)
+                        elif samples['type'] == 'review' and 0.51 > res[1]:
+                            results.append(caa_line)
+                    else:
+                        results.append(caa_line)
+                    print(res)
+                except Exception as e:
+                    print(f"Error: {e}")
+        else:
+            caa_line['rejected'] = output_dict['generation']
+            caa_line['rouge'] = Rouge().get_scores(
+                caa_line['rejected'], caa_line['chosen']
+            )[0]['rouge-l']['f']
+
+            if caa_line['rouge'] < rouge_threshold:
+                results.append(caa_line)
+            print(caa_line['rouge'])
+
+    return results
+
+def calculate_reward(task, action, observation):
+    res = [0, 0.0]
+    if action in func_cnt:
+        func_cnt[action][0] += 1
+    if task['type'] == 'search':
+        func_cnt['search_product_by_query'][1] += 1
+        if action == 'search_product_by_query':
+            res[0] = 1
+        target_asin = task['output']['product_info']['parent_asin']
+        if isinstance(observation, list):
+            for i in range(len(observation)):
+                if target_asin in observation[i]:
+                    res[1] = 1 - i/len(observation)
+                    break
+
+    elif task['type'] == 'recommend':
+        func_cnt['get_recommendations_by_history'][1] += 1
+        if action == 'get_recommendations_by_history':
+            res[0] = 1
+        target_asin = task['output']['product_info']['parent_asin']
+        if isinstance(observation, list):
+            for i in range(len(observation)):
+                if target_asin in observation[i]:
+                    res[1] = 1 - i/len(observation)
+                    break
+
+    elif task['type'] == 'review':
+        func_cnt['add_product_review'][1] += 1
+        if action == 'add_product_review':
+            res[0] = 1
+        if isinstance(observation, dict):
+            target_review = task['output']['review']['text']
+            agent_review = observation['review']
+            similarity = compute_similarity(target_review, agent_review)
+            res[1] = similarity
+    
+    return res
+
+def compute_similarity(target_review, agent_review):
+    sim_tokenizer = AutoTokenizer.from_pretrained("/inspire/hdd/global_user/zhangweinan-24046/all-MiniLM-L6-v2")
+    sim_model = AutoModel.from_pretrained('/inspire/hdd/global_user/zhangweinan-24046/all-MiniLM-L6-v2').to('cuda')
+    def mean_pooling(model_output, attention_mask):
+        token_embeddings = model_output[0] 
+        input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+        return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+    sentences = [target_review, agent_review]
+
+    encoded_input = sim_tokenizer(sentences, padding=True, truncation=True, return_tensors='pt')
+
+    if torch.cuda.is_available():
+        encoded_input.to('cuda')
+
+    with torch.no_grad():
+        model_output = sim_model(**encoded_input)
+
+    sentence_embeddings = mean_pooling(model_output, encoded_input['attention_mask'])
+
+    sentence_embeddings = F.normalize(sentence_embeddings, p=2, dim=1)
+
+    similarity = F.cosine_similarity(sentence_embeddings[0], sentence_embeddings[1], dim=0).item()
+    del model_output
+    del sentence_embeddings
+    torch.cuda.empty_cache()
+
+    return similarity
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Parser For Arguments",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    ## dataset related
+    parser.add_argument(
+        "--dataset", default="LaMP_4", help="Dataset to use, default: LaMP_4"
+    )
+    parser.add_argument("--data_path", default="./data", help="Path to save the data")
+    
+    ## output & log
+    parser.add_argument(
+        "--modelweight",
+        default="../model_weights",
+        help="Path to save the model weights.",
+    )
+    parser.add_argument(
+        "--k", type=int, default=5
+    )
+
+    parser.add_argument(
+        "--llm",
+        default='llama-3.1',
+        type=str
+    )
+    parser.add_argument(
+        "--form",
+        default='raw',
+        type=str
+    )
+    parser.add_argument(
+        "--rag",
+        type=str,
+        choices=["history", "others"],
+        default="others",
+    )
+    parser.add_argument(
+        "--num_neg_per_user",
+        type=int,
+        default=2
+    )
+    
+    args = parser.parse_args()
+    
+    if args.llm == 'qwen3':
+        args.base_model_addr = os.path.join(args.modelweight, 'Qwen3-8B')
+    elif args.llm == 'llama-3.1':
+        args.base_model_addr = os.path.join(args.modelweight, 'Meta-Llama-3.1-8B-Instruct')
+        
+    with open(os.path.join(args.data_path, args.dataset, 'processed', 'train_ranked.json'), 'r') as f:
+        calibration_ranked = json.load(f)
+    with open(os.path.join(args.data_path, args.dataset, 'processed', 'train.pkl'), 'rb') as f:
+        calibration_data = pkl.load(f)
+        u_ids = list(calibration_data.keys())
+    rouge_threshold = ROUGE_THRESHOLD_DICT.get(args.dataset, 0)
+    caa_dir = f"../pa_back/caa_data/caa_{args.form}_{args.dataset}_{rouge_threshold}_{args.llm}_{args.rag}_{args.k}.json"
+        
+    llm = LLM(
+        model=args.base_model_addr,             
+        tensor_parallel_size=torch.cuda.device_count(),  # use all GPUs
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.base_model_addr,
+        use_fast=False,
+    )
+    sampling_params = SamplingParams(
+        max_tokens=1024,                     
+        temperature=0.01, 
+    )
+    # Generate negtive samples
+    pos_neg_samples = {}
+    all_samples = 0
+    for idx, user in enumerate(u_ids):
+        pos_neg_samples[user] = []
+        quality_samples = 0
+
+        for samples in calibration_data[user]:
+            res = process_sample(samples, user, args, calibration_data, calibration_ranked, rouge_threshold)
+            pos_neg_samples[user].extend(res)
+            quality_samples += len(res)
+            print(f"[User {user}] Have generated {quality_samples} samples")
+        
+    with open(caa_dir, 'w') as f:
+        json.dump(pos_neg_samples, f, indent=4)
+        
+
+        
+    
+        
+    
+    
