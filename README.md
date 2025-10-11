@@ -1,6 +1,6 @@
 # Data Preparation
 See under [data_process/].
-The preparation process is for [LaMP_4](https://lamp-benchmark.github.io/), abstract generation and [PersonalWAB](https://github.com/HongruCai/PersonalWAB)
+The preparation process is for [Headline Generation](https://lamp-benchmark.github.io/), [Abstract Writing](https://longlamp-benchmark.github.io/), and [PersonalWAB](https://github.com/HongruCai/PersonalWAB)
 
 Run
 ```
@@ -9,7 +9,7 @@ Run
 to select some users for experiments.
 Run
 ```
-./ranking.py --task LaMP_4
+./ranking.py --task [your_task]
 ```
 to sort all historical samples according to their relevance to the corresponding training or testing samples.
 
