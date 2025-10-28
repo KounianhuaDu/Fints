@@ -17,7 +17,7 @@ to sort all historical samples according to their relevance to the corresponding
 For PersonalWAB, run
 ```
 python data_collect_pwab.py --dataset pwab \
---modelweight /inspire/hdd/global_user/zhangweinan-24046 \
+--modelweight [root_of_models] \
 --k 5 \
 --llm llama-3.1 \
 --form json \
