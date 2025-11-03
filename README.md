@@ -4,7 +4,7 @@ This is the repo for [Fints: Efficient Inference-Time Personalization for LLMs w
 <img width="659" height="260" alt="image" src="https://github.com/user-attachments/assets/3828ccd0-e96f-42b2-ab9e-5b95968b160c" />
 
 
-# Data Preparation
+## Data Preparation
 See under [data_process/].
 The preparation process is for [Headline Generation](https://lamp-benchmark.github.io/), [Abstract Writing](https://longlamp-benchmark.github.io/), and [PersonalWAB](https://github.com/HongruCai/PersonalWAB)
 
@@ -19,7 +19,7 @@ Run
 ```
 to sort all historical samples according to their relevance to the corresponding training or testing samples.
 
-# Negative Samples Generation
+## Negative Samples Generation
 For PersonalWAB, run
 ```
 python data_collect_pwab.py --dataset pwab \
@@ -37,7 +37,7 @@ For all datasets, run
 ```
 to generate negtive samples.
 
-# Vectors Generation and Evaluation
+## Vectors Generation and Evaluation
 Run
 ```
 ./run.sh
