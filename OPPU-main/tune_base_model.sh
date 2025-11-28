@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=0 python task_LoRA.py --k 0 --task_name news_headline
