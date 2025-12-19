@@ -48,6 +48,17 @@ After evaluation, for PersonalWAB, the evaluation scores will be saved; for othe
 
 By adding `--plugin` in `run_generation.py`, PA-steering can be used with lora models.
 
-
-
+# Citation
+If you find this repo useful, please cite our paper:
+```
+@misc{du2025fintsefficientinferencetimepersonalization,
+      title={Fints: Efficient Inference-Time Personalization for LLMs with Fine-Grained Instance-Tailored Steering}, 
+      author={Kounianhua Du and Jianxing Liu and Kangning Zhang and Wenxiang Jiao and Yuan Lu and Jiarui Jin and Weiwen Liu and Yong Yu and Weinan Zhang},
+      year={2025},
+      eprint={2510.27206},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2510.27206}, 
+}
+```
 
