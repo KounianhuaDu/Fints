@@ -1,4 +1,4 @@
-# Fints
+# Implementation
 This is the repo for 
 <img width="659" height="260" alt="image" src="https://github.com/user-attachments/assets/3828ccd0-e96f-42b2-ab9e-5b95968b160c" />
 
