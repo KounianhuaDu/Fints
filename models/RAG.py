@@ -3,6 +3,7 @@ from colorama import Fore, init
 init(autoreset=True)
 import json
 import os
+import inspect
 import torch
 from instruction import build_rag_instruction, SYS_PROMPT_SINGLE, get_his
 
@@ -24,7 +25,7 @@ class RAG:
         elif args.arch == "claude":
             self.generator = ClaudeChat(args.arch, args)
         elif args.arch == 'llama_steer':
-            self.generator = LlamaWrapper(os.path.join(args.modelweight, "Meta-Llama-3.1-8B-Instruct"))
+            self.generator = LlamaWrapper(os.path.join(args.modelweight, "Meta-Llama-3.1-8B-Instruct"), token_range=args.token_range)
         else:
             raise NotImplementedError
         
@@ -93,16 +94,49 @@ class RAG:
             else:
                 raw_prompt = build_rag_instruction(self.args.dataset, self.args.form, problem_instance['input'], ranked_his)
             print(Fore.GREEN + raw_prompt)
-            output = self.generator.generate_response_api(raw_prompt, top_k=1, system_message=self.system_message)
+            generate_kwargs = {
+                "top_k": 1,
+                "system_message": self.system_message,
+            }
+            if "return_usage" in inspect.signature(self.generator.generate_response_api).parameters:
+                generate_kwargs["return_usage"] = True
+
+            generation_result = self.generator.generate_response_api(
+                raw_prompt,
+                **generate_kwargs,
+            )
+
+            if isinstance(generation_result, dict):
+                output = generation_result.get("text", "")
+                token_usage = generation_result.get("token_usage")
+            else:
+                output = generation_result
+                token_usage = None
             print(Fore.YELLOW + output)
             output_dict = {
                 'id': p_id,
                 'generation': output,
                 'output': problem_instance['output']
             }
+            if token_usage is not None:
+                output_dict['token_usage'] = token_usage
         else:
             raw_prompt = self.build_enhanced_instruction(problem_instance['input'], ranked_his)
-            output = self.generator.generate_response_api(raw_prompt, top_k=1)
+            generate_kwargs = {"top_k": 1}
+            if "return_usage" in inspect.signature(self.generator.generate_response_api).parameters:
+                generate_kwargs["return_usage"] = True
+
+            generation_result = self.generator.generate_response_api(
+                raw_prompt,
+                **generate_kwargs,
+            )
+
+            if isinstance(generation_result, dict):
+                output = generation_result.get("text", "")
+                token_usage = generation_result.get("token_usage")
+            else:
+                output = generation_result
+                token_usage = None
             print(Fore.YELLOW + output)
             
             output_dict = {
@@ -112,6 +146,8 @@ class RAG:
                 'generation': output,
                 'output': problem_instance['output']
             }
+            if token_usage is not None:
+                output_dict['token_usage'] = token_usage
         
         return output_dict
     
@@ -171,11 +207,18 @@ class RAG:
             lora_k = 5 if self.args.dataset == 'pwab_pos' else 0
             task_name = task_name_dict[self.args.dataset]
             task_lora = f"./ckpt/{task_name}/k{lora_k}-{user_id}-Meta-Llama-3.1-8B-Instruct-OPPU_LoRA"
-        output = self.generator.generate(
+        generation_result = self.generator.generate(
             full_prompt,
             max_new_tokens=1024,
-            task_lora=task_lora
+            task_lora=task_lora,
+            return_usage=True,
         )
+        if isinstance(generation_result, dict):
+            output = generation_result.get("text", "")
+            token_usage = generation_result.get("token_usage")
+        else:
+            output = generation_result
+            token_usage = None
         output = output.replace("<|eot_id|>", "").replace("<|end_of_text|>", "").strip()
         print(Fore.YELLOW + output)
         output_dict = {
@@ -183,6 +226,8 @@ class RAG:
             'generation': output,
             'output': problem_instance['output']
         }
+        if token_usage is not None:
+            output_dict['token_usage'] = token_usage
         
         return output_dict
         

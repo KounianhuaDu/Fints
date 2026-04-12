@@ -244,17 +244,6 @@ for i in tqdm(range(len(train))):
             with open(f"../pa_back/data/{task_name}/processed/remain_train_ranked.json", 'r') as f:
                 visible_history_list = json.load(f)
 
-            # for p in visible_history_list:
-            #     for key, value in p.items():
-            #         p[key] = get_first_k_tokens(p[key], 368)
-
-            # history_list = [prompt_template[args.task_name]['retrieval_history'].format(**p) for p in visible_history_list]
-            # tokenized_corpus = [doc.split(" ") for doc in history_list]
-            # bm25 = BM25Okapi(tokenized_corpus)
-
-            # tokenized_query = prompt_template[args.task_name]["retrieval_query_wokey"].format(article).split(' ')
-            # retrieved_history = bm25.get_top_n(tokenized_query, history_list, n=args.k)
-
             history_string = get_his(task_name, q['user_id'], k)
             prompt = history_string + "\n" + prompt
             full_prompt = history_string + "\n" + full_prompt
@@ -262,7 +251,6 @@ for i in tqdm(range(len(train))):
         if args.add_profile:
             prompt = profile + "\n" + prompt
             full_prompt = profile + "\n" + full_prompt
-        import pdb; pdb.set_trace()
         train_data.append(
             {
                 "prompt": prompt,
@@ -272,7 +260,7 @@ for i in tqdm(range(len(train))):
 
 # print(train_data)
 
-train_dataset = Dataset.from_list(train_data).select(range(10000))
+train_dataset = Dataset.from_list(train_data).select(range(5000))
 train_dataset = train_dataset.map(generate_and_tokenize_prompt).shuffle()
 
 trainer = transformers.Trainer(
@@ -298,99 +286,3 @@ else:
     output_name = "./ckpt/{}/k{}-{}-task_LoRA_ckpt".format(args.task_name, args.k, model_name.split('/')[-1])
     
 model.save_pretrained(output_name)
-exit()
-
-model.eval()
-model.config.use_cache = True  # silence the warnings. Please re-enable for inference!
-
-for i in tqdm(range(len(test_data))):
-    if args.add_profile:
-        profile = test_profile[i]['output']
-
-    if k > 0:
-        visible_history_list = test_data[i]['profile']
-        for p in visible_history_list:
-            for key, value in p.items():
-                p[key] = get_first_k_tokens(p[key], 368)
-
-        history_list = [prompt_template[args.task_name]['retrieval_history'].format(**p) for p in visible_history_list]
-
-        tokenized_corpus = [doc.split(" ") for doc in history_list]
-        bm25 = BM25Okapi(tokenized_corpus)
-
-    test_question_list = []
-    question_id_list = []
-
-    for q in test_data[i]['query']:
-
-        if args.task_name == 'citation':
-            test_question = q['input']
-            test_article = extract_citation_title(test_question)
-            option1, option2 = extract_option(test_question, 1), extract_option(test_question, 2)
-            test_prompt = prompt_template[args.task_name]['prompt'].format(test_article, option1, option2)
-
-        else:
-            test_question = q['input']
-            test_article = extract_article(test_question)
-            test_prompt =  prompt_template[args.task_name]['prompt'].format(test_article)
-
-        if k > 0:
-            tokenized_query = prompt_template[args.task_name]['retrieval_query_wokey'].format(test_article).split(" ")
-            retrieved_history = bm25.get_top_n(tokenized_query, history_list, n=args.k)
-        
-            history_string = "".join(retrieved_history)
-            test_prompt = history_string + "\n" + test_prompt
-
-        if args.add_profile:
-            test_prompt = profile + "\n" + test_prompt
-
-        test_question_list.append(test_prompt)
-        question_id_list.append(q['id'])
-
-    test_batch_list = split_batch(test_question_list, 1)
-    out_list = []
-
-    with torch.no_grad():
-        for batch_idx, batch in tqdm(enumerate(test_batch_list), total=len(test_batch_list)):
-            # try:
-            sentences = batch
-            inputs = tokenizer(sentences, return_tensors="pt", padding=True, return_token_type_ids=False)
-            inputs = inputs.to(model.device)
-
-            with torch.autocast(device_type="cuda"):
-                outputs = model.generate(
-                    **inputs,
-                    do_sample=True,
-                    top_k=10,
-                    temperature=args.temperature,
-                    top_p=0.9,
-                    eos_token_id=tokenizer.eos_token_id,
-                    max_new_tokens=200
-                )
-
-            out_sentence = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-            out_list += out_sentence
-            # except:
-            #     out_list += ['']
-                
-    for i in range(len(out_list)):
-        output = out_list[i].replace(test_question_list[i], '')
-        pred_all.append({
-            "id": question_id_list[i],
-            "output": output
-            })
-        
-        print(output)
-
-output_file = {
-    'task': name2taskid[args.task_name],
-    'golds': pred_all,
-    'model': model_name,
-}
-
-if args.add_profile:
-    with open('./output/{}/output-task-k{}-{}-{}-profile.json'.format(args.k, args.task_name, args.task_name, model_name.split('/')[-1]), 'w') as f:
-        json.dump(output_file, f, indent=4)
-else:
-    with open('./output/{}/output-task-k{}-{}-{}.json'.format(args.k, args.task_name, args.task_name, model_name.split('/')[-1]), 'w') as f:
-        json.dump(output_file, f, indent=4)

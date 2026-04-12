@@ -18,50 +18,9 @@ import time
 # init_data = data
 
 
-def init_token_usage_summary():
-    return {
-        "total_problems": 0,
-        "generated_problems": 0,
-        "counted_problems": 0,
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
-        "avg_input_tokens": 0.0,
-        "avg_output_tokens": 0.0,
-        "avg_total_tokens": 0.0,
-    }
-
-
-def update_token_usage_summary(summary, token_usage):
-    if not token_usage:
-        return
-
-    input_tokens = int(token_usage.get("input_tokens", 0))
-    output_tokens = int(token_usage.get("output_tokens", 0))
-    total_tokens = int(token_usage.get("total_tokens", input_tokens + output_tokens))
-
-    summary["counted_problems"] += 1
-    summary["input_tokens"] += input_tokens
-    summary["output_tokens"] += output_tokens
-    summary["total_tokens"] += total_tokens
-
-
-def finalize_token_usage_summary(summary, total_problems, generated_problems):
-    summary["total_problems"] = total_problems
-    summary["generated_problems"] = generated_problems
-
-    if summary["counted_problems"] > 0:
-        summary["avg_input_tokens"] = summary["input_tokens"] / summary["counted_problems"]
-        summary["avg_output_tokens"] = summary["output_tokens"] / summary["counted_problems"]
-        summary["avg_total_tokens"] = summary["total_tokens"] / summary["counted_problems"]
-
-    return summary
-
-
 
 def main(problems, model, k, output_path, task_name, tmp_path, steering=False):
     outs = []
-    token_usage_summary = init_token_usage_summary()
     pwab_res = {
         "FACC": 0, 
         "RACC":{
@@ -78,13 +37,9 @@ def main(problems, model, k, output_path, task_name, tmp_path, steering=False):
             res = model.generate(problem_instance, k)
         if res:
             output_dict = res
-        elif args.vector_only:
-            continue
         else:
             print(f"Generation Error for problem {problem_instance['id']}.")
             continue
-
-        update_token_usage_summary(token_usage_summary, output_dict.get("token_usage"))
         
         with open(os.path.join(tmp_path, f"{problem_instance['id']}.json"), 'w') as f:
             json.dump(output_dict, f)
@@ -110,7 +65,6 @@ def main(problems, model, k, output_path, task_name, tmp_path, steering=False):
                 #     data=all_data, **action["arguments"]
                 # )
                 res = calculate_reward(problem_instance, action['name'], None)
-                output_dict['type'] = problem_instance['type']
             except Exception as e:
                 print(f"Error: {e}")
                 res = [0, 0.0]
@@ -118,18 +72,6 @@ def main(problems, model, k, output_path, task_name, tmp_path, steering=False):
             pwab_res["RACC"][problem_instance['type']].append(res[1])
             
         outs.append(output_dict)
-
-    token_usage_summary = finalize_token_usage_summary(
-        token_usage_summary,
-        total_problems=len(problems),
-        generated_problems=len(outs),
-    )
-
-    token_usage_path = os.path.join(os.path.dirname(output_path), "token_usage.json")
-    with open(token_usage_path, "w") as f:
-        json.dump(token_usage_summary, f, indent=4)
-    print("Token usage summary:", token_usage_summary)
-
     if task_name in ['pwab', 'pwab_pos']:
         for func, acc in pwab_res["RACC"].items():
             pwab_res["RACC"][func] = sum(acc) / max(len(acc), 1)
@@ -138,17 +80,15 @@ def main(problems, model, k, output_path, task_name, tmp_path, steering=False):
         print(pwab_res)
      
     # print(outs)   
-    if not args.vector_only:
-        with open(os.path.join(output_path), "w") as f:
-            json.dump(
-                {
-                    "task": task_name,
-                    "token_usage_summary": token_usage_summary,
-                    "golds": outs,
-                },
-                f,
-                indent=4
-            )   
+    with open(os.path.join(output_path), "w") as f:
+        json.dump(
+            {
+                "task": task_name,
+                "golds": outs,
+            },
+            f,
+            indent=4
+        )   
         
 
 if __name__ == "__main__":
@@ -208,7 +148,6 @@ if __name__ == "__main__":
     parser.add_argument("--alpha", type=float, default=1)
     parser.add_argument("--beta", type=float, default=1)
     parser.add_argument("--act_location", type=str, default='whole', help="Where to add the steering vector. Default is 'whole'.")
-    parser.add_argument("--vector_only", action="store_true")
     
     ## vllm
     parser.add_argument("--vllm", action="store_true", help="If True, use vllm.")
@@ -265,8 +204,6 @@ if __name__ == "__main__":
     parser.add_argument("--system_prompt", type=str, default="")
     parser.add_argument("--cluster", type=int, default=-1)
     parser.add_argument("--idx", type=int, default=0)
-    parser.add_argument("--token_range", type=str, default="response", choices=["response", "all", "prompt", "repe"])
-    parser.add_argument("--privacy", action="store_true", default=False)
     
 
     # Generate or eval
@@ -294,10 +231,13 @@ if __name__ == "__main__":
     
     # Path info
     vector_info = os.path.basename(args.vector_root)
-    os.makedirs(os.path.join(args.out_path, f"{args.algo}_{args.k}_{args.arch}_{args.cluster}_{args.plugin}", f"{vector_info}_{args.layers[0]}_{args.form}_{args.multipliers[0]}_{args.alpha}_{args.beta}_{args.weight_steer}_{args.idx}"), exist_ok=True)
-    output_path = os.path.join(args.out_path, f"{args.algo}_{args.k}_{args.arch}_{args.cluster}_{args.plugin}", f"{vector_info}_{args.layers[0]}_{args.form}_{args.multipliers[0]}_{args.alpha}_{args.beta}_{args.weight_steer}_{args.idx}", f'generation.json')
-    os.makedirs(os.path.join(args.res_path, f"{args.algo}_{args.k}_{args.arch}_{args.cluster}_{args.plugin}", f"{vector_info}_{args.layers[0]}_{args.form}_{args.multipliers[0]}_{args.alpha}_{args.beta}_{args.weight_steer}_{args.idx}"), exist_ok=True)
-    evaluation_res = os.path.join(args.res_path, f"{args.algo}_{args.k}_{args.arch}_{args.cluster}_{args.plugin}", f"{vector_info}_{args.layers[0]}_{args.form}_{args.multipliers[0]}_{args.alpha}_{args.beta}_{args.weight_steer}_{args.idx}", f'res.json')
+    # os.makedirs(os.path.join(args.out_path, f"{args.algo}_{args.k}_{args.arch}_{args.cluster}_{args.plugin}", f"{vector_info}_{args.layers[0]}_{args.form}_{args.multipliers[0]}_{args.alpha}_{args.beta}_{args.weight_steer}"), exist_ok=True)
+    # output_path = os.path.join(args.out_path, f"{args.algo}_{args.k}_{args.arch}_{args.cluster}_{args.plugin}", f"{vector_info}_{args.layers[0]}_{args.form}_{args.multipliers[0]}_{args.alpha}_{args.beta}_{args.weight_steer}", f'generation_{args.idx}.json')
+    # os.makedirs(os.path.join(args.res_path, f"{args.algo}_{args.k}_{args.arch}_{args.cluster}_{args.plugin}", f"{vector_info}_{args.layers[0]}_{args.form}_{args.multipliers[0]}_{args.alpha}_{args.beta}_{args.weight_steer}"), exist_ok=True)
+    # evaluation_res = os.path.join(args.res_path, f"{args.algo}_{args.k}_{args.arch}_{args.cluster}_{args.plugin}", f"{vector_info}_{args.layers[0]}_{args.form}_{args.multipliers[0]}_{args.alpha}_{args.beta}_{args.weight_steer}", f'res_{args.idx}.json')
+    output_dir = "pa_back/output/generation/rag_5_llama3-8b_2_False/llama-3.1_LaMP_4_20_raw_1.0_1.0_1.0_False_chosen_n5/generation.json"
+    output_path = output_dir.replace("res.", "generation.").replace("res/", "generation/")
+    evaluation_res = output_path.replace("generation", "res")
 
     
     os.makedirs(args.tmp_path, exist_ok=True)

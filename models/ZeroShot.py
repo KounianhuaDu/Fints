@@ -1,6 +1,7 @@
 from ChatModels import *
 from colorama import Fore, init
 init(autoreset=True)
+import inspect
 
 from instruction import pretty_product, SYS_PROMPT_SINGLE
 
@@ -34,13 +35,32 @@ class ZeroShot:
         else:
             raw_prompt = self.build_instruction(problem_instance['input'])
         print(Fore.GREEN + raw_prompt)
-        output = self.generator.generate_response_api(raw_prompt, top_k=1, system_message=self.system_message)
+        generate_kwargs = {
+            "top_k": 1,
+            "system_message": self.system_message,
+        }
+        if "return_usage" in inspect.signature(self.generator.generate_response_api).parameters:
+            generate_kwargs["return_usage"] = True
+
+        generation_result = self.generator.generate_response_api(
+            raw_prompt,
+            **generate_kwargs,
+        )
+
+        if isinstance(generation_result, dict):
+            output = generation_result.get("text", "")
+            token_usage = generation_result.get("token_usage")
+        else:
+            output = generation_result
+            token_usage = None
         print(Fore.YELLOW + output)
         output_dict = {
             'id': p_id,
             'generation': output,
             'output': problem_instance['output']
         }
+        if token_usage is not None:
+            output_dict['token_usage'] = token_usage
 
         return output_dict
 

@@ -1,2 +1,2 @@
 from .Llama import LlamaChat
-from .model_wrapper import LlamaWrapper, GemmaWrapper
+from .model_wrapper import LlamaWrapper

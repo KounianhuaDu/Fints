@@ -54,7 +54,10 @@ class BlockOutputWrapper(t.nn.Module):
 
         self.activations = None
         self.add_activations = None
+        self.add_attention_activations = None
+        self.add_mlp_activations = None
         self.from_position = None
+        self.to_position = None
 
         self.save_internal_decodings = False
 
@@ -79,6 +82,7 @@ class BlockOutputWrapper(t.nn.Module):
                 vector=self.add_activations,
                 position_ids=kwargs["position_ids"],
                 from_pos=self.from_position,
+                to_pos=self.to_position,
             )
             output = (augmented_output,) + output[1:]
         
@@ -90,6 +94,7 @@ class BlockOutputWrapper(t.nn.Module):
                     vector=self.add_attention_activations,
                     position_ids=kwargs["position_ids"],
                     from_pos=self.from_position,
+                    to_pos=self.to_position,
                 )
                 # self.block.self_attn.activations = augmented_attn
                 
@@ -97,11 +102,12 @@ class BlockOutputWrapper(t.nn.Module):
                 new_mlp_output = self.block.mlp(mlp_input)
                 if self.add_mlp_activations is not None:
                     new_mlp_output = add_vector_from_position(
-                    matrix=new_mlp_output,
-                    vector=self.add_mlp_activations,
-                    position_ids=kwargs["position_ids"],
-                    from_pos=self.from_position,
-                )
+                        matrix=new_mlp_output,
+                        vector=self.add_mlp_activations,
+                        position_ids=kwargs["position_ids"],
+                        from_pos=self.from_position,
+                        to_pos=self.to_position,
+                    )
                 
                 final_output = args[0] + augmented_attn + new_mlp_output
                 output = (final_output,) + output[1:]
@@ -117,6 +123,7 @@ class BlockOutputWrapper(t.nn.Module):
                     vector=self.add_mlp_activations,
                     position_ids=kwargs["position_ids"],
                     from_pos=self.from_position,
+                    to_pos=self.to_position,
                 )
                 
                 final_output = args[0] + attn_output + augmented_mlp
@@ -158,6 +165,7 @@ class BlockOutputWrapper(t.nn.Module):
         self.block.self_attn.activations = None
         self.mlp_output = None
         self.from_position = None
+        self.to_position = None
         self.calc_dot_product_with = None
         self.dot_products = []
 
@@ -169,10 +177,12 @@ class LlamaWrapper:
         use_chat: bool = False,
         override_model_weights_path: Optional[str] = None,
         device: str = "cuda",
+        token_range: str = "response"
     ):
         self.device = device
         self.use_chat = use_chat
         self.model_name_path = model_name_or_path
+        self.token_range = token_range
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_name_path,
             padding_side="right" if "gemma" in self.model_name_path else "left",
@@ -205,11 +215,34 @@ class LlamaWrapper:
         for layer in self.model.model.layers:
             layer.save_internal_decodings = value
 
-    def set_from_positions(self, pos: int):
+    def set_from_positions(self, pos: Optional[int]):
         for layer in self.model.model.layers:
             layer.from_position = pos
 
-    def generate(self, full_prompt, max_new_tokens=100, task_lora=None):
+    def set_to_positions(self, pos: Optional[int]):
+        for layer in self.model.model.layers:
+            layer.to_position = pos
+
+    def set_position_range(self, from_pos: Optional[int], to_pos: Optional[int]):
+        self.set_from_positions(from_pos)
+        self.set_to_positions(to_pos)
+
+    def set_intervention_token_range(self, token_range: str, instr_pos: int):
+        if token_range == "prompt":
+            self.set_position_range(None, instr_pos)
+            return
+        if token_range == "response":
+            self.set_position_range(instr_pos, None)
+            return
+        if token_range in ["all", "repe"]:
+            self.set_position_range(None, None)
+            return
+
+        raise ValueError(
+            "token_range must be one of: prompt, response, all"
+        )
+
+    def generate(self, full_prompt, max_new_tokens=100, task_lora=None, return_usage: bool = False):
         if task_lora:
             model = PeftModel.from_pretrained(model=self.model, model_id=task_lora, is_trainable=False)
         else:
@@ -241,6 +274,18 @@ class LlamaWrapper:
             message = self.tokenizer.batch_decode(
                 generated_ids, skip_special_tokens=True
             )[0]
+            input_tokens = int(model_inputs.input_ids.shape[-1])
+            output_tokens = int(generated_ids[0].shape[-1]) if generated_ids else 0
+
+            if return_usage:
+                return {
+                    "text": message,
+                    "token_usage": {
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "total_tokens": input_tokens + output_tokens,
+                    },
+                }
             return message
 
     def generate_text(self, user_input: str, model_output: Optional[str] = None, system_prompt: Optional[str] = None, max_new_tokens: int = 50) -> str:
@@ -253,10 +298,10 @@ class LlamaWrapper:
         tokens = t.tensor(tokens).unsqueeze(0).to(self.device)
         return self.generate(tokens, max_new_tokens=max_new_tokens)
 
-    def get_logits(self, tokens):
+    def get_logits(self, tokens, token_range: str = "response"):
         with t.no_grad():
             instr_pos = find_instruction_end_postion(tokens[0], self.END_STR)
-            self.set_from_positions(instr_pos)
+            self.set_intervention_token_range(token_range, instr_pos)
             logits = self.model(tokens).logits
             return logits
 
@@ -268,7 +313,7 @@ class LlamaWrapper:
         else:
             tokens = tokenize_llama_base(tokenizer=self.tokenizer, user_input=user_input, model_output=model_output)
         tokens = t.tensor(tokens).unsqueeze(0).to(self.device)
-        return self.get_logits(tokens)
+        return self.get_logits(tokens, token_range=self.token_range)
 
     def get_last_activations(self, layer):
         return self.model.model.layers[layer].activations
@@ -382,5 +427,3 @@ class LlamaWrapper:
         probs_percent = [int(v * 100) for v in values.tolist()]
         tokens = self.tokenizer.batch_decode(indices.unsqueeze(-1))
         return list(zip(tokens, probs_percent)), list(zip(tokens, values.tolist()))
-
-

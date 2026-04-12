@@ -21,7 +21,7 @@ import signal
 
 from data_process import pretty_history, mini_pretty_history
 from instruction import get_his, build_rag_instruction, SYS_PROMPT_SINGLE
-from pwab import functions, data
+# from pwab import functions, data
 
 def handler(sig, frame):
     print("Exiting gracefully...")
@@ -33,8 +33,8 @@ ROUGE_THRESHOLD_DICT = {
     'LaMP_5': 0.15,
     'abstract_generation': 0.2,
 }
-functions_dict = {tool.__name__: tool for tool in functions}
-init_data = data
+# functions_dict = {tool.__name__: tool for tool in functions}
+# init_data = data
 func_cnt = {
     "add_product_review": [0, 0],
     "get_recommendations_by_history": [0, 0],
@@ -294,6 +294,12 @@ if __name__ == "__main__":
         type=int,
         default=2
     )
+    parser.add_argument(
+        "--tensor_parallel_size",
+        type=int,
+        default=1,
+        help="vLLM tensor parallel size. Default uses a single visible GPU.",
+    )
     
     args = parser.parse_args()
     
@@ -309,10 +315,33 @@ if __name__ == "__main__":
         u_ids = list(calibration_data.keys())
     rouge_threshold = ROUGE_THRESHOLD_DICT.get(args.dataset, 0)
     caa_dir = f"../pa_back/caa_data/caa_{args.form}_{args.dataset}_{rouge_threshold}_{args.llm}_{args.rag}_{args.k}.json"
+
+    if not os.path.isdir(args.base_model_addr):
+        raise FileNotFoundError(f"Model path not found: {args.base_model_addr}")
+
+    visible_gpu_count = torch.cuda.device_count()
+    if visible_gpu_count < 1:
+        raise RuntimeError(
+            "No CUDA GPU is visible to PyTorch, but data_collect_para.py uses vLLM. "
+            "Please check CUDA_VISIBLE_DEVICES and your CUDA environment."
+        )
+
+    if args.tensor_parallel_size < 1:
+        raise ValueError("--tensor_parallel_size must be at least 1.")
+
+    if args.tensor_parallel_size > visible_gpu_count:
+        raise ValueError(
+            f"--tensor_parallel_size={args.tensor_parallel_size} exceeds visible GPU count "
+            f"({visible_gpu_count})."
+        )
+
+    print(Fore.GREEN + f"Using model: {args.base_model_addr}")
+    print(Fore.GREEN + f"Visible GPUs: {visible_gpu_count}")
+    print(Fore.GREEN + f"tensor_parallel_size: {args.tensor_parallel_size}")
         
     llm = LLM(
         model=args.base_model_addr,             
-        tensor_parallel_size=torch.cuda.device_count(),  # use all GPUs
+        tensor_parallel_size=args.tensor_parallel_size,
     )
     tokenizer = AutoTokenizer.from_pretrained(
         args.base_model_addr,

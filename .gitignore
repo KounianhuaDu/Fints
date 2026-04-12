@@ -1,0 +1,6 @@
+.vscode
+pa_back
+OPPU-main/output*
+OPPU-main/ckpt
+**/__pycache__/
+*.pyc

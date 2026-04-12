@@ -22,6 +22,17 @@ def test_add_vector_from_position():
     assert t.allclose(result, expected)
 
 
+def test_add_vector_with_upper_bound():
+    matrix = t.tensor([[1, 2], [3, 4], [5, 6]], dtype=t.float32)
+    vector = t.tensor([1, 1], dtype=t.float32)
+    position_ids = t.tensor([1, 2, 3])
+    result = add_vector_from_position(
+        matrix, vector, position_ids, from_pos=None, to_pos=2
+    )
+    expected = t.tensor([[2, 3], [4, 5], [5, 6]], dtype=t.float32)
+    assert t.allclose(result, expected)
+
+
 def test_find_last_subtensor_position():
     tensor = t.tensor([1, 2, 3, 4, 5, 1, 2, 3])
     sub_tensor = t.tensor([1, 2, 3])

@@ -23,7 +23,7 @@ def set_plotting_settings():
 
 
 
-def add_vector_from_position(matrix, vector, position_ids, from_pos=None):
+def add_vector_from_position(matrix, vector, position_ids, from_pos=None, to_pos=None):
     # print('###########add_vector_from_position############')
     # pdb.set_trace()
     from_id = from_pos
@@ -31,7 +31,11 @@ def add_vector_from_position(matrix, vector, position_ids, from_pos=None):
         # print('from_pos is None')
         from_id = position_ids.min().item() - 1
 
-    mask = position_ids >= from_id
+    to_id = to_pos
+    if to_id is None:
+        to_id = position_ids.max().item()
+
+    mask = (position_ids >= from_id) & (position_ids <= to_id)
     mask = mask.unsqueeze(-1)
 
     matrix += mask.float() * vector

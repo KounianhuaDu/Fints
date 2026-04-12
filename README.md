@@ -11,7 +11,8 @@ Run
 ```
 ./new_data_process.py
 ```
-to select some users for experiments.
+to select some users for experiments. Modify the data file path and number of users if needed.
+
 Run
 ```
 ./ranking.py --task [your_task]
@@ -26,13 +27,13 @@ python data_collect_pwab.py --dataset pwab \
 --k 5 \
 --llm llama-3.1 \
 --form json \
---data_path ../pa_back/data
+--data_path [path to your data]
 ```
 to generate positive samples.
 
 For all datasets, run
 ```
-./data_collect.sh
+./data_collect_para.sh
 ```
 to generate negtive samples.
 
@@ -41,11 +42,24 @@ Run
 ```
 ./run.sh
 ```
-to generate personalized steering vectors and evaluate the model on the test set.
+to generate personalized steering vectors and evaluate the model on the test set. 
 
 After evaluation, for PersonalWAB, the evaluation scores will be saved; for other datasets, add the parameter `--eval `in `run_generation.py` and run again to obtain the model's evaluation scores.
 
-By adding `--plugin` in `run_generation.py`, PA-steering can be used with lora models.
+## Other baselines
+- OPPU: Run `OPPU-main/run_OPPU.sh`
+- PerPcs: Run `Per-Pcs-main/run_PerPcs.sh`
+- ReLLa: Run `ReLLa/run.sh`
+- SynthesizeMe: Run 
+```
+bash ./vllm.sh
+python ./SynthesizeMe.py \
+    --dataset LaMP_4 \
+    --port 8010 \
+    --best-of-n 2 \
+```
+
+
 
 
 

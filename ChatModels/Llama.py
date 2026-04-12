@@ -3,7 +3,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import time
 import json
-from .instruction import *
+from instruction import *
 from colorama import Fore, init
 import os
 from peft import PeftModel
@@ -36,7 +36,7 @@ class LlamaChat:
             )
         else:
             self.tokenizer = AutoTokenizer.from_pretrained(
-                self.model_path, use_fast=False, padding_side="left"
+                self.model_path, use_fast=True, padding_side="left"
             )
             self.tokenizer.pad_token_id = 0  # unk. to be different from the eos token
 
@@ -90,6 +90,7 @@ class LlamaChat:
         max_length: int = 1024,
         system_message: str = None,
         temperature: float = 0,
+        return_usage: bool = False,
     ):
         
         sys_msg = (
@@ -119,7 +120,18 @@ class LlamaChat:
             log_probs_for_generated_tokens = (
                 None  # Initialize to handle cases where it's not needed
             )
-            message = output[0].outputs[0].text
+            request_output = output[0]
+            generated_output = request_output.outputs[0]
+            message = generated_output.text
+            prompt_token_ids = getattr(request_output, "prompt_token_ids", None)
+            generated_token_ids = getattr(generated_output, "token_ids", None)
+
+            input_tokens = len(prompt_token_ids) if prompt_token_ids is not None else len(
+                self.tokenizer.encode(full_prompt)
+            )
+            output_tokens = len(generated_token_ids) if generated_token_ids is not None else len(
+                self.tokenizer.encode(message, add_special_tokens=False)
+            )
         else:
             model_inputs = self.tokenizer([full_prompt], return_tensors="pt").to(
                 self.model.device
@@ -144,6 +156,18 @@ class LlamaChat:
             message = self.tokenizer.batch_decode(
                 generated_ids, skip_special_tokens=True
             )[0]
+            input_tokens = int(model_inputs.input_ids.shape[-1])
+            output_tokens = int(generated_ids[0].shape[-1]) if generated_ids else 0
+
+        if return_usage:
+            return {
+                "text": message,
+                "token_usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": input_tokens + output_tokens,
+                },
+            }
 
         return message
     

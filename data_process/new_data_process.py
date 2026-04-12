@@ -3,13 +3,48 @@ import pickle as pkl
 import json
 import os
 import random
+import argparse
 from colorama import Fore, init
 from collections import defaultdict
 import pandas as pd
 import glob
 init(autoreset=True)
 
-def process_data(root_dir, dataset, threshold):
+def build_lamp_sample(sample, output):
+    profile = []
+    profile_dates = []
+    for item in sample['profile']:
+        profile_item = item.copy()
+        profile_item['date'] = item.get('date')
+        profile.append(profile_item)
+        if profile_item['date'] is not None:
+            profile_dates.append(profile_item['date'])
+
+    return {
+        'id': sample['id'],
+        'input': sample['input'],
+        'profile': profile,
+        'user_id': sample['user_id'],
+        'output': output,
+        'date': max(profile_dates) if profile_dates else None,
+    }
+
+def normalize_output_suffix(output_suffix):
+    if not output_suffix:
+        return ''
+    return output_suffix if output_suffix.startswith('_') else f'_{output_suffix}'
+
+def dump_processed_splits(root_dir, dataset, output_suffix='', **splits):
+    output_suffix = normalize_output_suffix(output_suffix)
+    output_dir = os.path.join(root_dir, dataset, 'processed')
+    os.makedirs(output_dir, exist_ok=True)
+
+    for split_name, split_data in splits.items():
+        output_path = os.path.join(output_dir, f'{split_name}{output_suffix}.pkl')
+        with open(output_path, 'wb') as f:
+            pkl.dump(split_data, f)
+
+def process_data(root_dir, dataset, threshold, output_suffix=''):
     with open(os.path.join(root_dir, dataset, 'train/train_questions.json'), 'r') as f:
         train_data = json.load(f)
     with open(os.path.join(root_dir, dataset, 'train/train_outputs.json'), 'r') as f:
@@ -30,23 +65,13 @@ def process_data(root_dir, dataset, threshold):
     
     for sample, out in zip(train_data, train_output['golds']):
         assert sample['id'] == out['id'] 
-        line = {}
-        line['id'] = sample['id']
-        line['input'] = sample['input']
-        line['profile'] = sample['profile']
-        line['user_id'] = sample['user_id']
-        line['output'] = out['output']
+        line = build_lamp_sample(sample, out['output'])
         train_uid_set[sample['user_id']] += len(sample['profile'])
         train_samples[sample['user_id']].append(line)
     
     for sample, out in zip(test_data, test_output['golds']):
         assert sample['id'] == out['id'] 
-        line = {}
-        line['id'] = sample['id']
-        line['input'] = sample['input']
-        line['profile'] = sample['profile']
-        line['user_id'] = sample['user_id']
-        line['output'] = out['output']
+        line = build_lamp_sample(sample, out['output'])
         test_uid_set[sample['user_id']] += len(sample['profile'])
         test_samples[sample['user_id']].append(line)
         
@@ -72,17 +97,16 @@ def process_data(root_dir, dataset, threshold):
             seen_test[uid] = samples
         elif uid in filtered_unseen_users_test:
             unseen_test[uid] = samples
-    
-    os.makedirs(os.path.join(root_dir, dataset, 'processed'), exist_ok=True)
-    
-    with open(os.path.join(root_dir, dataset, 'processed', 'train.pkl'), 'wb') as f:
-        pkl.dump(train, f)
-    with open(os.path.join(root_dir, dataset, 'processed', 'remain_train.pkl'), 'wb') as f:
-        pkl.dump(remaining_train, f)
-    with open(os.path.join(root_dir, dataset, 'processed', 'seen_test.pkl'), 'wb') as f:
-        pkl.dump(seen_test, f)
-    with open(os.path.join(root_dir, dataset, 'processed', 'unseen_test.pkl'), 'wb') as f:
-        pkl.dump(unseen_test, f)
+
+    dump_processed_splits(
+        root_dir,
+        dataset,
+        output_suffix=output_suffix,
+        train=train,
+        remain_train=remaining_train,
+        seen_test=seen_test,
+        unseen_test=unseen_test,
+    )
         
     train_sample_num = [train_uid_set[uid] for uid in list(train.keys())]
     remain_train_sample_num = [train_uid_set[uid] for uid in list(remaining_train.keys())]
@@ -104,7 +128,7 @@ def process_data(root_dir, dataset, threshold):
     print(Fore.GREEN + f"# Historical Samples of Seen Test: {sum(seen_test_sample_num)}")
     print(Fore.GREEN + f"# Historical Samples of Unseen Test: {sum(unseen_test_sample_num)}")
     
-def process_data_parquet(root_dir, dataset, threshold):
+def process_data_parquet(root_dir, dataset, threshold, output_suffix=''):
     all_files = [f for f in os.listdir(os.path.join(root_dir, dataset)) if 'train' in f]
     train_data = []
     for file in all_files:
@@ -176,17 +200,16 @@ def process_data_parquet(root_dir, dataset, threshold):
             seen_test[uid] = samples
         elif uid in filtered_unseen_users_test:
             unseen_test[uid] = samples
-            
-    os.makedirs(os.path.join(root_dir, dataset, 'processed'), exist_ok=True)
-    
-    with open(os.path.join(root_dir, dataset, 'processed', 'train.pkl'), 'wb') as f:
-        pkl.dump(train, f)
-    with open(os.path.join(root_dir, dataset, 'processed', 'remain_train.pkl'), 'wb') as f:
-        pkl.dump(remaining_train, f)
-    with open(os.path.join(root_dir, dataset, 'processed', 'seen_test.pkl'), 'wb') as f:
-        pkl.dump(seen_test, f)
-    with open(os.path.join(root_dir, dataset, 'processed', 'unseen_test.pkl'), 'wb') as f:
-        pkl.dump(unseen_test, f)
+
+    dump_processed_splits(
+        root_dir,
+        dataset,
+        output_suffix=output_suffix,
+        train=train,
+        remain_train=remaining_train,
+        seen_test=seen_test,
+        unseen_test=unseen_test,
+    )
             
     train_sample_num = [train_uid_set[uid] for uid in list(train.keys())]
     remain_train_sample_num = [train_uid_set[uid] for uid in list(remaining_train.keys())]
@@ -208,7 +231,7 @@ def process_data_parquet(root_dir, dataset, threshold):
     print(Fore.GREEN + f"# Historical Samples of Seen Test: {sum(seen_test_sample_num)}")
     print(Fore.GREEN + f"# Historical Samples of Unseen Test: {sum(unseen_test_sample_num)}")
     
-def process_data_pwab(root_dir, dataset, threshold):
+def process_data_pwab(root_dir, dataset, threshold, output_suffix=''):
     FOLDER_PATH = os.path.join(root_dir, dataset, 'data')
     def merge_json_files(file_pattern):
         merged_data = {}
@@ -286,17 +309,16 @@ def process_data_pwab(root_dir, dataset, threshold):
             seen_test[uid] = samples
         elif uid in filtered_unseen_users_test:
             unseen_test[uid] = samples
-            
-    os.makedirs(os.path.join(root_dir, dataset, 'processed'), exist_ok=True)
-    
-    with open(os.path.join(root_dir, dataset, 'processed', 'train.pkl'), 'wb') as f:
-        pkl.dump(train, f)
-    with open(os.path.join(root_dir, dataset, 'processed', 'remain_train.pkl'), 'wb') as f:
-        pkl.dump(remaining_train, f)
-    with open(os.path.join(root_dir, dataset, 'processed', 'seen_test.pkl'), 'wb') as f:
-        pkl.dump(seen_test, f)
-    with open(os.path.join(root_dir, dataset, 'processed', 'unseen_test.pkl'), 'wb') as f:
-        pkl.dump(unseen_test, f)
+
+    dump_processed_splits(
+        root_dir,
+        dataset,
+        output_suffix=output_suffix,
+        train=train,
+        remain_train=remaining_train,
+        seen_test=seen_test,
+        unseen_test=unseen_test,
+    )
             
     train_sample_num = [train_uid_set[uid] for uid in list(train.keys())]
     remain_train_sample_num = [train_uid_set[uid] for uid in list(remaining_train.keys())]
@@ -317,6 +339,21 @@ def process_data_pwab(root_dir, dataset, threshold):
     print(Fore.GREEN + f"# Historical Samples of Remain Train: {sum(remain_train_sample_num)}")
     print(Fore.GREEN + f"# Historical Samples of Seen Test: {sum(seen_test_sample_num)}")
     print(Fore.GREEN + f"# Historical Samples of Unseen Test: {sum(unseen_test_sample_num)}")
-    
-process_data_parquet('../../pa_back/data', 'abstract_generation', 1000)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--root_dir', default='../../pa_back/data')
+    parser.add_argument('--dataset', default='abstract_generation')
+    parser.add_argument('--threshold', type=int, default=1000)
+    parser.add_argument('--mode', choices=['lamp', 'parquet', 'pwab'], default='parquet')
+    parser.add_argument('--output_suffix', default='')
+    args = parser.parse_args()
 
+    if args.mode == 'lamp':
+        process_data(args.root_dir, args.dataset, args.threshold, output_suffix=args.output_suffix)
+    elif args.mode == 'parquet':
+        process_data_parquet(args.root_dir, args.dataset, args.threshold, output_suffix=args.output_suffix)
+    else:
+        process_data_pwab(args.root_dir, args.dataset, args.threshold, output_suffix=args.output_suffix)
+
+if __name__ == '__main__':
+    main()

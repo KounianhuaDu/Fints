@@ -13,6 +13,7 @@ from dataloader import (
 from data_process import extract_after_colon, extract_from_title, retrieve_top_k_with_contriver, batchify
 from transformers import AutoModel, AutoTokenizer
 from instruction import get_his, build_rag_instruction, SYS_PROMPT_SINGLE
+import random
 
 class PerSteer:
     def __init__(self, args, ranking_dict, enhanced=False):
@@ -44,10 +45,13 @@ class PerSteer:
         self.steering_dict = dict()
         self.attn_steering_dict = dict()
         self.mlp_steering_dict = dict()
+        self.steering_dict_all = dict()
+        self.attn_steering_dict_all = dict()
+        self.mlp_steering_dict_all = dict()
         self.tokenizer = AutoTokenizer.from_pretrained("facebook/contriever", cache_dir=args.contriever_checkpoint)
         self.contriver = AutoModel.from_pretrained("facebook/contriever", cache_dir=args.contriever_checkpoint).to("cuda:0")
         self.output_dir = os.path.join(
-            args.vector_data_path, "caa_vector_pt", f"{args.arch}_{args.data_name}_{args.act_location}_persteer"
+            args.vector_data_path, "caa_vector_pt", f"{args.arch}_{args.data_name}_{args.act_location}_persteer_{args.token_range}"
         )
         os.makedirs(self.output_dir, exist_ok=True)
         
@@ -170,11 +174,39 @@ class PerSteer:
         # Setup model
         self.generator.reset_all()
         user_id = problem_instance['user_id']
-        profile = self.vector_dataset_all[str(user_id)]
-        if user_id != self.current_user:
-            self.get_vectors(str(user_id))
-            self.current_user = user_id
+        if self.args.privacy:
+            profile = []
+            for samples in self.vector_dataset_all.values():
+                profile.extend(samples)
             self.corpus = [f"{x['question']} {x['chosen']}" for x in profile]
+            print(Fore.GREEN + f"Corpus size: {len(self.corpus)}")
+            self.corpus = random.sample(self.corpus, min(1500, len(self.corpus)))
+        else:
+            profile = self.vector_dataset_all[str(user_id)]
+
+        if self.steering_dict_all or self.attn_steering_dict_all or self.mlp_steering_dict_all:
+            self.steering_dict = self.steering_dict_all
+            if self.args.act_location == 'attnmlp':
+                self.attn_steering_dict = self.attn_steering_dict_all
+                self.mlp_steering_dict = self.mlp_steering_dict_all
+        elif self.args.privacy:
+            for uid in self.vector_dataset_all.keys():
+                self.get_vectors(str(uid))
+                self.steering_dict_all.update(self.steering_dict)
+                if self.args.act_location == 'attnmlp':
+                    self.attn_steering_dict_all.update(self.attn_steering_dict)
+                    self.mlp_steering_dict_all.update(self.mlp_steering_dict)
+                self.steering_dict = self.steering_dict_all
+                if self.args.act_location == 'attnmlp':
+                    self.attn_steering_dict = self.attn_steering_dict_all
+                    self.mlp_steering_dict = self.mlp_steering_dict_all
+        else:
+            if user_id != self.current_user:
+                self.get_vectors(str(user_id))
+                self.current_user = user_id
+                self.corpus = [f"{x['question']} {x['chosen']}" for x in profile]
+            if self.args.vector_only:
+                return None
         
         if 'LaMP' in self.args.dataset:
             inp = extract_after_colon(problem_instance['input'])
@@ -187,6 +219,7 @@ class PerSteer:
                                                         profile, inp, min(len(profile), k), return_weight=True)
             # print(weights)
         else:
+            print(len(profile), len(self.corpus))
             ranked_profiles = retrieve_top_k_with_contriver(self.contriver, self.tokenizer, self.corpus, 
                                                         profile, inp, min(len(profile), k))
         
@@ -273,11 +306,18 @@ class PerSteer:
             lora_k = 5 if self.args.dataset == 'pwab_pos' else 0
             task_name = task_name_dict[self.args.dataset]
             task_lora = f"./ckpt/{task_name}/k{lora_k}-{user_id}-Meta-Llama-3.1-8B-Instruct-OPPU_LoRA"
-        output = self.generator.generate(
+        generation_result = self.generator.generate(
             full_prompt,
             max_new_tokens=1024,
-            task_lora=task_lora
+            task_lora=task_lora,
+            return_usage=True,
         )
+        if isinstance(generation_result, dict):
+            output = generation_result.get("text", "")
+            token_usage = generation_result.get("token_usage")
+        else:
+            output = generation_result
+            token_usage = None
         output = output.replace("<|eot_id|>", "").replace("<|end_of_text|>", "").strip()
         print(Fore.YELLOW + output)
         output_dict = {
@@ -285,6 +325,8 @@ class PerSteer:
             'generation': output,
             'output': problem_instance['output']
         }
+        if token_usage is not None:
+            output_dict['token_usage'] = token_usage
         
         return output_dict
         

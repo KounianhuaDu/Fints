@@ -15,6 +15,7 @@ from dataloader import (
     GenerationDataset, 
 )
 import json
+import numpy as np
 
 from instruction import SYS_PROMPT_SINGLE
 
@@ -24,14 +25,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--data_path",
         type=str,
-        default="../pa_back/caa_data",
+        default="./pa_back/caa_data",
     )
     parser.add_argument("--data_name", type=str, default="caa_python_LaMP_4_0.15_qwen_others")
     parser.add_argument("--model_name", type=str, default="llama-3.1")
     parser.add_argument("--system_prompt", type=str, default="")
     parser.add_argument("--model_name_or_path", type=str, default="../model_weights/fix/Meta-Llama-3.1-8B-Instruct")
     parser.add_argument("--rerun", action="store_true", default=False, help="Rerun even if files already exist")
-    parser.add_argument("--act_location", type=str, choices=['whole', 'attn', 'mlp'], default='whole')
+    parser.add_argument("--act_location", type=str, choices=['whole', 'attn', 'mlp', 'attnmlp'], default='whole')
+    parser.add_argument("--vec_strategy", type=str, default="mean", choices=["mean", "logistic", "pca"])
+    parser.add_argument("--token_range", type=str, default="response", choices=["response", "all", "prompt", "repe"])
 
     args = parser.parse_args()
     print(args)
@@ -46,8 +49,7 @@ if __name__ == "__main__":
     else:
         raise NotImplementedError(f"Model {args.model_name} not supported")
     tokenizer = model.tokenizer
-    pos_activations = dict([(layer, []) for layer in args.layers])
-    neg_activations = dict([(layer, []) for layer in args.layers])
+    hidden_size = getattr(model.model.config, "hidden_size", 4096)
     if args.act_location == 'whole':
         get_activations = model.get_last_activations
     elif args.act_location == 'attn':
@@ -67,14 +69,16 @@ if __name__ == "__main__":
     device = model.device
     if args.model_name == "gemma-2-9b" or args.model_name=="llama-3.1":
         output_dir = os.path.join(
-            args.data_path, "caa_vector_pt", f"{args.model_name}_{args.data_name}_{args.act_location}"
+            args.data_path, "caa_vector_pt", f"{args.model_name}_{args.data_name}_{args.act_location}_{args.vec_strategy}_{args.token_range}"
         )
     else:
         output_dir = os.path.join(
             args.data_path, args.data_name, "caa_vector", f"{args.model_name}_{args.mode}"
         )
     for i, (uid, vector_dataset) in enumerate(vector_dataset_all.items()):
-        print(i)
+        pos_activations = dict([(layer, []) for layer in args.layers])
+        neg_activations = dict([(layer, []) for layer in args.layers])
+        # print(i)
         pos_tokens_list, neg_tokens_list = [], []
         if os.path.exists(os.path.join(output_dir, f"{uid}_{args.layers[0]}.pt")) and not args.rerun:
             continue
@@ -127,6 +131,13 @@ if __name__ == "__main__":
             p_tokens = p_tokens_dict["pos_tokens"]
             n_tokens = n_tokens_dict["neg_tokens"]
             ques_tokens_len = p_tokens_dict["ques_tokens_len"]
+            if args.token_range == "response":
+                from_position = ques_tokens_len
+            elif args.token_range == 'repe':
+                from_position = ques_tokens_len - 1
+            else:
+                from_position = None
+            to_position = None if args.token_range in ["response", "all"] else ques_tokens_len
             
             # Get positive logits
             model.reset_all()
@@ -134,7 +145,7 @@ if __name__ == "__main__":
 
             for layer in args.layers:
                 p_activations = get_activations(layer)
-                p_activations = p_activations[0, ques_tokens_len:, :].mean(0).detach()
+                p_activations = p_activations[0, from_position:to_position, :].mean(0).detach()
                 pos_activations[layer].append(p_activations.cpu())
 
             # Get negative logits
@@ -143,7 +154,7 @@ if __name__ == "__main__":
 
             for layer in args.layers:
                 n_activations = get_activations(layer)
-                n_activations = n_activations[0, ques_tokens_len:, :].mean(0).detach()
+                n_activations = n_activations[0, from_position:to_position, :].mean(0).detach()
                 neg_activations[layer].append(n_activations.cpu())
 
         if not os.path.exists(output_dir):
@@ -151,12 +162,57 @@ if __name__ == "__main__":
 
         for layer in args.layers:
             if (len(pos_activations[layer]) == 0):
-                p_activations = model.get_last_activations(layer)
-                vec = torch.zeros(4096)
+                vec = torch.zeros(hidden_size)
             else:
-                all_pos_layer = torch.stack(pos_activations[layer])
-                all_neg_layer = torch.stack(neg_activations[layer])
-                vec = (all_pos_layer - all_neg_layer).mean(dim=0).to(model.device) 
+                all_pos_layer = torch.stack(pos_activations[layer]).detach().float()
+                all_neg_layer = torch.stack(neg_activations[layer]).detach().float()
+
+                if args.vec_strategy == "mean":
+                    vec = (all_pos_layer - all_neg_layer).mean(dim=0).to(model.device)
+                elif args.vec_strategy == "logistic":
+                    from sklearn.linear_model import LogisticRegression
+
+                    all_pos_layer = all_pos_layer.cpu().numpy()
+                    all_neg_layer = all_neg_layer.cpu().numpy()
+                    X = np.concatenate([all_pos_layer, all_neg_layer], axis=0)
+                    y = np.array([1] * all_pos_layer.shape[0] + [-1] * all_neg_layer.shape[0])
+                    clf = LogisticRegression(
+                        penalty='l2',       # 使用 L2 正则化
+                        C=1.0,                # 正则化参数
+                        fit_intercept=True, # 允许偏置项
+                        solver='liblinear', # 对于小样本数据集(样本数<维度)，liblinear通常更快更稳
+                        random_state=42
+                    )
+                    clf.fit(X, y)
+                    w = clf.coef_[0]
+                    w_norm = np.linalg.norm(w)
+                    if w_norm > 1e-8:
+                        style_vector = w / w_norm
+                    else:
+                        style_vector = w
+                    vec = torch.from_numpy(style_vector).float()
+                elif args.vec_strategy == "pca":
+                    from sklearn.decomposition import PCA
+
+                    diff_layer = (all_pos_layer - all_neg_layer).cpu().numpy()
+                    mean_direction = diff_layer.mean(axis=0)
+                    centered_diff = diff_layer - mean_direction
+
+                    if diff_layer.shape[0] == 1 or np.linalg.norm(centered_diff) <= 1e-8:
+                        style_vector = mean_direction
+                    else:
+                        pca = PCA(n_components=1, random_state=42)
+                        pca.fit(diff_layer)
+                        style_vector = pca.components_[0]
+                        if np.dot(style_vector, mean_direction) < 0:
+                            style_vector = -style_vector
+
+                    style_norm = np.linalg.norm(style_vector)
+                    if style_norm > 1e-8:
+                        style_vector = style_vector / style_norm
+                    vec = torch.from_numpy(style_vector).float()
+                else:
+                    raise ValueError(f"Unknown vec_strategy: {args.vec_strategy}")
 
             torch.save(
                 vec.cpu(),

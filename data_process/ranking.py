@@ -122,78 +122,122 @@ def pwab_corpus_maker(inp, profile):
      
     return corpus, inp, None
 
+def latest_date_from_ranked_profile(ranked_profile, top_k):
+    candidate_dates = [
+        item.get('date')
+        for item in ranked_profile[:top_k]
+        if item.get('date') is not None
+    ]
+    return max(candidate_dates) if candidate_dates else None
+
+def rank_split(target_data, task, ranker, args, contriver=None, tokenizer=None):
+    rank_dict = dict()
+    for user_id, samples in target_data.items():
+        for data in tqdm.tqdm(samples):
+            inp = data['input']
+            if args.task == 'LaMP_4':
+                profile = data['profile']
+            elif args.task == 'pwab':
+                profile = data['history']
+                profile = [item for item in profile if item['review']['timestamp'] < data['timestamp']]
+            else:
+                samples_cp = deepcopy(samples)
+                samples_cp.remove(data)
+                profile = samples_cp
+            if task == "LaMP_1":
+                corpus, query, ids = classification_citation_query_corpus_maker(inp, profile, args.use_date)
+            elif task == "LaMP_3":
+                corpus, query, ids = classification_review_query_corpus_maker(inp, profile, args.use_date)
+            elif task == "LaMP_2":
+                corpus, query = classification_movies_query_corpus_maker(inp, profile, args.use_date)
+            elif task == "LaMP_4":
+                corpus, query, ids = generation_news_query_corpus_maker(inp, profile, args.use_date)
+            elif task == "LaMP_5":
+                corpus, query, ids = generation_paper_query_corpus_maker(inp, profile, args.use_date)
+            elif task == "LaMP_7":
+                corpus, query, ids = parphrase_tweet_query_corpus_maker(inp, profile, args.use_date)
+            elif task == "LaMP_6":
+                corpus, query, ids = generation_avocado_query_corpus_maker(inp, profile, args.use_date)
+            elif task == "abstract_generation":
+                corpus, query, ids = abstract_generation_corpus_maker(inp, profile)
+            elif task == "pwab":
+                corpus, query, ids = pwab_corpus_maker(inp, profile)
+            
+            if ranker == "contriever":
+                randked_profile = retrieve_top_k_with_contriver(contriver, tokenizer, corpus, profile, query, len(profile), args.batch_size)
+            elif ranker == "bm25":
+                randked_profile = retrieve_top_k_with_bm25(corpus, profile, query, len(profile))
+            elif ranker == "recency":
+                profile = sorted(profile, key=lambda x: tuple(map(int, str(x['date']).split("-"))))
+                randked_profile = profile[::-1]
+
+            rank_dict[data['id']] = randked_profile
+    return rank_dict
+
+def apply_ranked_topk_dates(data_dir, task, files, top_k, output_suffix):
+    for file in files:
+        split_name = file.split('.')[0]
+        data_path = os.path.join(data_dir, task, 'processed', file)
+        ranked_path = os.path.join(data_dir, task, 'processed', f'{split_name}_ranked.json')
+
+        with open(data_path, 'rb') as f:
+            target_data = pkl.load(f)
+        with open(ranked_path, 'r') as f:
+            rank_dict = json.load(f)
+
+        updated_data = dict()
+        for user_id, samples in target_data.items():
+            updated_samples = []
+            for sample in samples:
+                ranked_profile = rank_dict[str(sample['id'])]
+                updated_sample = dict(sample)
+                updated_sample['date'] = latest_date_from_ranked_profile(ranked_profile, top_k)
+                updated_samples.append(updated_sample)
+            updated_data[user_id] = updated_samples
+
+        output_name = f'{split_name}_{output_suffix}.pkl'
+        with open(os.path.join(data_dir, task, 'processed', output_name), 'wb') as f:
+            pkl.dump(updated_data, f)
+
+        print(f"{output_name} generated.")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--data", default='../../pa_back/data')
     parser.add_argument("--task", required = True)
+    parser.add_argument("--mode", choices=["rank", "apply_topk_date"], default="rank")
     parser.add_argument("--ranker", default='contriever')
+    parser.add_argument("--files", nargs='+', default=['train.pkl'])
     parser.add_argument("--batch_size", type = int, default=16)
     parser.add_argument("--use_date", action='store_true')
+    parser.add_argument("--top_k_date", type=int, default=5)
+    parser.add_argument("--output_suffix", default='rank_top5_latest_date')
     parser.add_argument("--contriever_checkpoint", default="/inspire/hdd/global_user/zhangweinan-24046/contriever")
 
     args = parser.parse_args()
     task = args.task
     ranker = args.ranker
-    
-    #Preload the model to avoid repeated loading.
-    if ranker == "contriever":
-        tokenizer = AutoTokenizer.from_pretrained("facebook/contriever", cache_dir=args.contriever_checkpoint)
-        contriver = AutoModel.from_pretrained("facebook/contriever", cache_dir=args.contriever_checkpoint).to("cuda:0")
-        contriver.eval()
-        print('Contriever loaded.')
-    
-    to_be_ranked = ['train.pkl']
-    # to_be_ranked = ["remain_train.pkl"]
-    
-    for file in to_be_ranked:
-        with open(os.path.join(args.data, args.task, 'processed', file), 'rb') as f:
-            target_data = pkl.load(f)
-        rank_dict = dict()
-        for user_id, samples in target_data.items():
-            for data in tqdm.tqdm(samples):
-                inp = data['input']
-                if args.task == 'LaMP_4':
-                    profile = data['profile']
-                elif args.task == 'pwab':
-                    profile = data['history']
-                    profile = [item for item in profile if item['review']['timestamp'] < data['timestamp']]
-                else:
-                    samples_cp = deepcopy(samples)
-                    samples_cp.remove(data)
-                    profile = samples_cp
-                if task == "LaMP_1":
-                    corpus, query, ids = classification_citation_query_corpus_maker(inp, profile, args.use_date)
-                elif task == "LaMP_3":
-                    corpus, query, ids = classification_review_query_corpus_maker(inp, profile, args.use_date)
-                elif task == "LaMP_2":
-                    corpus, query = classification_movies_query_corpus_maker(inp, profile, args.use_date)
-                elif task == "LaMP_4":
-                    corpus, query, ids = generation_news_query_corpus_maker(inp, profile, args.use_date)
-                elif task == "LaMP_5":
-                    corpus, query, ids = generation_paper_query_corpus_maker(inp, profile, args.use_date)
-                elif task == "LaMP_7":
-                    corpus, query, ids = parphrase_tweet_query_corpus_maker(inp, profile, args.use_date)
-                elif task == "LaMP_6":
-                    corpus, query, ids = generation_avocado_query_corpus_maker(inp, profile, args.use_date)
-                elif task == "abstract_generation":
-                    corpus, query, ids = abstract_generation_corpus_maker(inp, profile)
-                elif task == "pwab":
-                    corpus, query, ids = pwab_corpus_maker(inp, profile)
-                
-                if ranker == "contriever":
-                    randked_profile = retrieve_top_k_with_contriver(contriver, tokenizer, corpus, profile, query, len(profile), args.batch_size)
-                elif ranker == "bm25":
-                    randked_profile = retrieve_top_k_with_bm25(corpus, profile, query, len(profile))
-                elif ranker == "recency":
-                    profile = sorted(profile, key=lambda x: tuple(map(int, str(x['date']).split("-"))))
-                    randked_profile = profile[::-1]
 
-                rank_dict[data['id']] = randked_profile
+    if args.mode == "apply_topk_date":
+        apply_ranked_topk_dates(args.data, args.task, args.files, args.top_k_date, args.output_suffix)
+    else:
+        contriver = None
+        tokenizer = None
+        if ranker == "contriever":
+            tokenizer = AutoTokenizer.from_pretrained("facebook/contriever", cache_dir=args.contriever_checkpoint)
+            contriver = AutoModel.from_pretrained("facebook/contriever", cache_dir=args.contriever_checkpoint).to("cuda:0")
+            contriver.eval()
+            print('Contriever loaded.')
 
-        out_name = file.split('.')[0] + '_ranked.json'
-        with open(os.path.join(args.data, args.task, 'processed', out_name), 'w') as f:
-            json.dump(rank_dict, f, indent=4)
-        
-        print(f"{out_name} generated.")
+        for file in args.files:
+            with open(os.path.join(args.data, args.task, 'processed', file), 'rb') as f:
+                target_data = pkl.load(f)
+            rank_dict = rank_split(target_data, task, ranker, args, contriver=contriver, tokenizer=tokenizer)
+
+            out_name = file.split('.')[0] + '_ranked.json'
+            with open(os.path.join(args.data, args.task, 'processed', out_name), 'w') as f:
+                json.dump(rank_dict, f, indent=4)
+            
+            print(f"{out_name} generated.")

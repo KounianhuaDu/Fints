@@ -20,10 +20,10 @@ import torch.nn.functional as F
 
 from personalized_lora import PersonalModel
 from instruction import get_his, SYS_PROMPT_SINGLE
-from pwab import functions, data
+# from pwab import functions, data
 
-functions_dict = {tool.__name__: tool for tool in functions}
-init_data = data
+# functions_dict = {tool.__name__: tool for tool in functions}
+# init_data = data
 
 
 parser = argparse.ArgumentParser(description="Parser for LoRA")
@@ -143,6 +143,20 @@ training_arguments = transformers.TrainingArguments(
     lr_scheduler_type='linear',
     report_to='none',
 )
+
+if not args.task_lora:
+    raise ValueError("--task_lora is required for OPPU training.")
+
+if not os.path.isdir(args.task_lora):
+    raise FileNotFoundError(f"Task LoRA checkpoint not found: {args.task_lora}")
+
+task_model = PeftModel.from_pretrained(
+    model=base_model,
+    model_id=args.task_lora,
+    is_trainable=False,
+)
+base_model = task_model.merge_and_unload()
+print(f"Loaded task LoRA checkpoint from {args.task_lora}")
 
 test_data = dict()
 if args.remain_rate > 0:
@@ -311,10 +325,6 @@ def compute_similarity(target_review, agent_review):
 
 # training
 from datasets import load_dataset, Dataset
-# model = PeftModel.from_pretrained(model=base_model, model_id=args.task_lora, is_trainable=False)
-# base_model = model.merge_and_unload()
-# print_trainable_parameters(model)
-
 
 pred_all = []
 actual = []
@@ -407,7 +417,7 @@ for user_id, samples in test_data.items():
     # test inference
     personal_model = PersonalModel(args, model, tokenizer)
     outs = []
-    eval_k = 5
+    eval_k = args.k
     for problem_instance in tqdm(data[user_id]):
         # Generate Code & Trace
         res = personal_model.generate(problem_instance, eval_k)
@@ -445,6 +455,7 @@ for user_id, samples in test_data.items():
             },
             f,
         )
+    base_model = model.unload()
         
 if args.task_name == 'pwab':
     evaluation_res = f'./res/{args.task_name}/k{args.k}-{model_name.split("/")[-1]}_{eval_k}_{args.remain_rate}'
@@ -455,93 +466,3 @@ if args.task_name == 'pwab':
     with open(os.path.join(evaluation_res, 'res.json'), 'w') as f:
         json.dump(pwab_res, f, indent=4)
     print(pwab_res)
-#     if args.add_profile:
-#         profile = test_profile[i]['output']
-
-#     if k > 0:
-#         visible_history_list = test_data[i]['profile']
-#         for p in visible_history_list:
-#             for key, value in p.items():
-#                 p[key] = get_first_k_tokens(p[key], 368)
-
-#         history_list = [prompt_template[args.task_name]['retrieval_history'].format(**p) for p in visible_history_list]
-
-#         tokenized_corpus = [doc.split(" ") for doc in history_list]
-#         bm25 = BM25Okapi(tokenized_corpus)
-
-#     test_question_list = []
-#     question_id_list = []
-
-#     for q in test_data[i]['query']:
-
-#         if args.task_name == 'citation':
-#             test_question = q['input']
-#             test_article = extract_citation_title(test_question)
-#             option1, option2 = extract_option(test_question, 1), extract_option(test_question, 2)
-#             test_prompt = prompt_template[args.task_name]['prompt'].format(test_article, option1, option2)
-
-#         else:
-#             test_question = q['input']
-#             test_article = extract_article(test_question)
-#             test_prompt =  prompt_template[args.task_name]['prompt'].format(test_article)
-
-#         if k > 0:
-#             tokenized_query = prompt_template[args.task_name]['retrieval_query_wokey'].format(test_article).split(" ")
-#             retrieved_history = bm25.get_top_n(tokenized_query, history_list, n=args.k)
-        
-#             history_string = "".join(retrieved_history)
-#             test_prompt = history_string + "\n" + test_prompt
-
-#         if args.add_profile:
-#             test_prompt = profile + "\n" + test_prompt
-
-#         test_question_list.append(test_prompt)
-#         question_id_list.append(q['id'])
-
-#     test_batch_list = split_batch(test_question_list, 1)
-#     out_list = []
-
-#     with torch.no_grad():
-#         for batch_idx, batch in tqdm(enumerate(test_batch_list), total=len(test_batch_list)):
-#             # try:
-#             sentences = batch
-#             inputs = tokenizer(sentences, return_tensors="pt", padding=True, return_token_type_ids=False)
-#             inputs = inputs.to(model.device)
-
-#             with torch.autocast(device_type="cuda"):
-#                 outputs = model.generate(
-#                     **inputs,
-#                     do_sample=True,
-#                     top_k=10,
-#                     temperature=args.temperature,
-#                     top_p=0.9,
-#                     eos_token_id=tokenizer.eos_token_id,
-#                     max_new_tokens=200
-#                 )
-
-#             out_sentence = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-#             out_list += out_sentence
-#             # except:
-#             #     out_list += ['']
-                
-#     for i in range(len(out_list)):
-#         output = out_list[i].replace(test_question_list[i], '')
-#         pred_all.append({
-#             "id": question_id_list[i],
-#             "output": output
-#             })
-        
-#         print(output)
-
-# output_file = {
-#     'task': name2taskid[args.task_name],
-#     'golds': pred_all,
-#     'model': model_name,
-# }
-
-# if args.add_profile:
-#     with open('./output/{}/output-OPPU-k{}-{}-{}-profile.json'.format(args.k, args.task_name, args.task_name, model_name.split('/')[-1]), 'w') as f:
-#         json.dump(output_file, f, indent=4)
-# else:
-#     with open('./output/{}/output-OPPU-k{}-{}-{}.json'.format(args.k, args.task_name, args.task_name, model_name.split('/')[-1]), 'w') as f:
-#         json.dump(output_file, f, indent=4)

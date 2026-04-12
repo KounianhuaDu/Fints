@@ -63,10 +63,12 @@ def create_metric_mae_rmse():
 
 def create_metric_rouge():
     rouge_metric = evaluate.load("rouge", cache_dir='./evaluate_metrics/rouge')
+    meteor = evaluate.load("meteor", cache_dir='./evaluate_metrics/meteor')
     def compute_metrics(decoded_preds, decoded_labels):
         decoded_preds, decoded_labels = postprocess_text_generation(decoded_preds, decoded_labels)
         result_rouge = rouge_metric.compute(predictions=decoded_preds, references=decoded_labels)
-        result = {"rouge-1" : result_rouge["rouge1"], "rouge-L" : result_rouge["rougeL"]}
+        result_meteor = meteor.compute(predictions=decoded_preds, references=decoded_labels)
+        result = {"rouge-1" : result_rouge["rouge1"], "rouge-L" : result_rouge["rougeL"], "meteor": result_meteor["meteor"]}
         return result
     return compute_metrics
 
@@ -75,7 +77,7 @@ def evaluate_task(predictions_dir):
         with open(predictions_dir, 'rb') as f:
             data = json.load(f)
         
-        task_name = data['task']
+        task_name = data.get('task', None) or data.get('dataset', None)
         lines = data['golds']
         
         preds = []
@@ -97,6 +99,22 @@ def evaluate_task(predictions_dir):
                 line['generation'].replace("<|begin_of_text|>", "")
                 preds.append(regularize(line['generation']))
                 golds.append(line['output'])
+
+    if data.get('dataset', None) == 'pwab_pos':
+        reward = []
+        for line in lines:
+            gen = json.loads(line['generation'])
+            action = gen.get('tool_call', None)
+            if line['type'] == 'search' and action.get('name') == 'search_product_by_query':
+                reward.append(1)
+            elif line['type'] == 'recommend' and action.get('name') == 'get_recommendations_by_history':
+                reward.append(1)
+            elif line['type'] == 'review' and action.get('name') == 'add_product_review':
+                reward.append(1)
+            else:
+                reward.append(0)
+        return {'FACC': sum(reward)/len(reward)}
+
                 
     if task_name in ["LaMP_1", "LaMP_2"]:
         metric = create_metric_f1_accuracy(self._get_labels(task_name))
@@ -211,7 +229,9 @@ def regularize(text):
     res = ""
     for line in lines:
         if len(line) > 1 and 'headline' not in line and 'title' not in line and 'abstract' not in line:
-            return line  
+            # return line  
+            if len(line) > len(res):
+                res = line
     return res
     
 def calculate_reward(task, action, observation):
